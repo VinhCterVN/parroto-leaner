@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from .config import config, clean_token
+from .auth import TokenManager
 from .models.card import Card
 from .scraper import CardScraper
 from .submitter import CardSubmitter
@@ -53,6 +54,18 @@ def parse_args():
         help="Override Parroto Bearer/Access token (otherwise loaded from .env)",
     )
     parser.add_argument(
+        "--refresh-token",
+        type=str,
+        default=None,
+        help="Override Firebase/Google refresh token for auto-refresh (otherwise loaded from .env)",
+    )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=None,
+        help="Override Firebase/Google API key (otherwise loaded from .env)",
+    )
+    parser.add_argument(
         "--build-id",
         type=str,
         default=None,
@@ -79,9 +92,9 @@ def parse_args():
     )
     parser.add_argument(
         "--interval",
-        type=int,
+        type=float,
         default=None,
-        help="Interval in minutes between submit rounds in 'loop' mode (default: 10)",
+        help="Interval in minutes between submit rounds in 'loop' mode (default: 10, set to 0 for no interval)",
     )
     parser.add_argument(
         "--refresh",
@@ -106,7 +119,13 @@ def do_fetch(scraper: CardScraper, cards_path: Path, check_pro: bool = False):
     return cards
 
 
-async def do_submit(submitter: CardSubmitter, cards, linear: bool = False, delay: float = 0.5, cooldown_429: float = 10.0):
+async def do_submit(
+    submitter: CardSubmitter,
+    cards,
+    linear: bool = False,
+    delay: float = 0.5,
+    cooldown_429: float = 10.0,
+):
     print("\n--- [STEP 2] SUBMITTING REVIEWS ---")
     if linear:
         return await submitter.submit_linear(cards, delay=delay, rate_limit_delay=cooldown_429)
@@ -117,22 +136,43 @@ async def do_submit(submitter: CardSubmitter, cards, linear: bool = False, delay
 async def async_main():
     args = parse_args()
 
-    token = clean_token(args.token) if args.token else config.bearer_token
+    # Initialize TokenManager
+    token_manager = TokenManager(
+        access_token=clean_token(args.token) if args.token else None,
+        refresh_token=clean_token(args.refresh_token) if args.refresh_token else None,
+        api_key=clean_token(args.api_key) if args.api_key else None,
+    )
+
+    # If no initial access token or token placeholder, attempt auto-refresh
+    if not token_manager.access_token or token_manager.access_token in ("abc_zyz", "your_bearer_token_here"):
+        if token_manager.can_refresh:
+            print("[*] No active access token provided. Requesting fresh token using REFRESH_TOKEN...")
+            try:
+                await token_manager.refresh()
+            except Exception as e:
+                print(f"[ERROR] Failed to obtain token via REFRESH_TOKEN: {e}")
+                sys.exit(1)
+        else:
+            print("[ERROR] No valid authentication credentials found!")
+            print("Please configure either:")
+            print("  1. REFRESH_TOKEN and API_KEY in your .env (Recommended - never expires!)")
+            print("  2. Or set BEARER_TOKEN in .env (or pass --token <your_token>).")
+            sys.exit(1)
+
     build_id = args.build_id or config.build_id
     concurrency = args.concurrency or config.concurrency
     rating = args.rating or config.rating
     cards_path = Path(args.cards_file) if args.cards_file else config.cards_file
-    interval = args.interval or config.loop_interval_minutes
+    interval = args.interval if args.interval is not None else config.loop_interval_minutes
     linear_delay = args.delay if args.delay is not None else config.linear_delay
     cooldown_429 = args.cooldown_429 if args.cooldown_429 is not None else config.cooldown_429
 
-    if not token or token in ("abc_zyz", "your_bearer_token_here"):
-        print("[ERROR] No valid Bearer/Access token found!")
-        print("Please configure BEARER_TOKEN in your .env file or pass --token <your_token>.")
-        sys.exit(1)
-
-    scraper = CardScraper(bearer_token=token, build_id=build_id)
-    submitter = CardSubmitter(bearer_token=token, rating=rating, concurrency=concurrency)
+    scraper = CardScraper(token_manager=token_manager, build_id=build_id)
+    submitter = CardSubmitter(
+        token_manager=token_manager,
+        rating=rating,
+        concurrency=concurrency,
+    )
 
     action = args.action
     is_linear = args.linear or action in ("linear", "submit-linear")
@@ -141,9 +181,13 @@ async def async_main():
         do_fetch(scraper, cards_path, check_pro=args.check_pro)
 
     elif action in ("submit", "linear", "submit-linear"):
-        cards = scraper.load_from_file(cards_path)
+        if args.refresh or not cards_path.exists():
+            cards = do_fetch(scraper, cards_path, check_pro=args.check_pro)
+        else:
+            cards = scraper.load_from_file(cards_path)
+
         if not cards:
-            print(f"[!] No cards found in {cards_path}. Please run 'fetch' or 'run' first.")
+            print("[!] No cards available to submit.")
             sys.exit(1)
         await do_submit(submitter, cards, linear=is_linear, delay=linear_delay, cooldown_429=cooldown_429)
 
@@ -173,6 +217,8 @@ async def async_main():
 
         mode_str = "LINEAR" if is_linear else f"SIMULTANEOUS (concurrency={concurrency})"
         print(f"\n[*] Starting Loop Mode ({mode_str}): will run every {interval} minute(s).")
+        if token_manager.can_refresh:
+            print("[*] Auto-refresh is ACTIVE: tokens will renew automatically in the background.")
         print("[*] Press Ctrl+C at any time to exit.")
 
         round_num = 1
@@ -180,14 +226,23 @@ async def async_main():
             print(f"\n{'#'*60}")
             print(f"### LOOP ROUND {round_num} - {time.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"{'#'*60}")
+
+            # Ensure valid token before each loop iteration
+            await token_manager.get_token()
+
             await do_submit(submitter, cards, linear=is_linear, delay=linear_delay, cooldown_429=cooldown_429)
 
             wait_secs = interval * 60
-            print(f"[*] Round {round_num} completed. Sleeping for {interval} minute(s) ({wait_secs}s)...")
-            try:
-                await asyncio.sleep(wait_secs)
-            except asyncio.CancelledError:
-                break
+            if wait_secs > 0:
+                print(f"[*] Round {round_num} completed. Sleeping for {interval} minute(s) ({wait_secs:.1f}s)...")
+                try:
+                    await asyncio.sleep(wait_secs)
+                except asyncio.CancelledError:
+                    break
+            else:
+                print(f"[*] Round {round_num} completed. Starting next round immediately without interval...")
+                # Small yield to let any background tasks / cancellation be handled
+                await asyncio.sleep(0)
             round_num += 1
 
 

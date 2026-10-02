@@ -9,8 +9,14 @@ from .config import config
 
 
 class CardScraper:
-    def __init__(self, bearer_token: Optional[str] = None, build_id: Optional[str] = None):
-        self.token = bearer_token or config.bearer_token
+    def __init__(
+        self,
+        bearer_token: Optional[str] = None,
+        build_id: Optional[str] = None,
+        token_manager: Optional[Any] = None,
+    ):
+        self.token_manager = token_manager
+        self.token = bearer_token or (token_manager.get_token_sync() if token_manager else config.bearer_token)
         self.build_id = build_id or config.build_id
         self.headers = {
             "User-Agent": (
@@ -23,8 +29,9 @@ class CardScraper:
 
     def _get_cookies(self) -> Dict[str, str]:
         cookies = {}
-        if self.token:
-            cookies["access_token"] = self.token
+        token = self.token_manager.get_token_sync() if self.token_manager else self.token
+        if token:
+            cookies["access_token"] = token
         return cookies
 
     def resolve_build_id(self, client: httpx.Client) -> str:

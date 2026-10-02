@@ -1,6 +1,6 @@
 import asyncio
 import re
-from typing import List, Optional
+from typing import List, Optional, Any
 import httpx
 
 from .models.card import Card, SubmitResult
@@ -15,7 +15,9 @@ class CardSubmitter:
         bearer_token: Optional[str] = None,
         rating: Optional[str] = None,
         concurrency: Optional[int] = None,
+        token_manager: Optional[Any] = None,
     ):
+        self.token_manager = token_manager
         self.token = bearer_token or config.bearer_token
         self.rating = rating or config.rating
         self.concurrency = concurrency or config.concurrency
@@ -26,13 +28,15 @@ class CardSubmitter:
         card: Card,
         index: int,
         total: int,
+        refreshed_retry: bool = False,
     ) -> SubmitResult:
+        token = await self.token_manager.get_token() if self.token_manager else self.token
         payload = {
             "cardId": card.card_id,
             "rating": self.rating,
         }
         headers = {
-            "Authorization": f"Bearer {self.token}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -58,7 +62,7 @@ class CardSubmitter:
                 streak = card_data.get("new_streak")
                 next_review = card_data.get("next_review_at")
                 print(
-                    f"[{index}/{total}] [SUCCESS] {card_label:<20} (ID: {card.card_id}) "
+                    f"[{index}/{total}] [SUCCESS] {card_label:<20} "
                     f"+{diamonds} diamond(s) | Streak: {streak}"
                 )
                 return SubmitResult(
@@ -70,6 +74,26 @@ class CardSubmitter:
                     diamonds_earned=diamonds,
                     new_streak=streak,
                     next_review_at=next_review,
+                )
+
+            # Unauthorized (401) - Try auto-refreshing token
+            if res.status_code == 401:
+                if not refreshed_retry and self.token_manager and self.token_manager.can_refresh:
+                    print(f"[{index}/{total}] [AUTH 401] Token expired! Auto-refreshing access token...")
+                    try:
+                        await self.token_manager.refresh()
+                        # Retry request once with the new token
+                        return await self._send_request(client, card, index, total, refreshed_retry=True)
+                    except Exception as refresh_err:
+                        print(f"[{index}/{total}] [AUTH_ERROR] Token refresh failed: {refresh_err}")
+
+                print(f"[{index}/{total}] [AUTH_ERROR] Token expired or invalid! (HTTP 401)")
+                return SubmitResult(
+                    card_id=card.card_id,
+                    word=card.word or card.card_id,
+                    status="error",
+                    status_code=res.status_code,
+                    message="Token expired or unauthorized (401)",
                 )
 
             # Delayed / cooldown response
@@ -87,17 +111,6 @@ class CardSubmitter:
                     status_code=res.status_code,
                     message=message,
                     remaining_time=remaining,
-                )
-
-            # Unauthorized
-            if res.status_code == 401:
-                print(f"[{index}/{total}] [AUTH_ERROR] Token expired or invalid! (HTTP 401)")
-                return SubmitResult(
-                    card_id=card.card_id,
-                    word=card.word or card.card_id,
-                    status="error",
-                    status_code=res.status_code,
-                    message="Token expired or unauthorized (401)",
                 )
 
             # 429 Too Many Requests

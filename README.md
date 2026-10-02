@@ -6,6 +6,7 @@ Bulk card reviewer & portfolio booster for [Parroto](https://parroto.app).
 
 - **Automated Preview Card Collection**: Scrapes preview cards across all accessible decks via Next.js endpoints and stores a simple array of card IDs (`["id1", "id2", ...]`) in `data/cards.json`.
 - **Auto-Resolving Build ID**: Automatically extracts and falls back to active Next.js `buildId` if Parroto redeploys.
+- **🔄 Auto Token Renewal (Never Expires!)**: Automatically requests fresh access tokens from Google Identity Platform using `REFRESH_TOKEN` and `API_KEY`. If an access token expires mid-loop (after 1 hour), it seamlessly renews and keeps running indefinitely without manual intervention.
 - **Two Submission Modes**:
   - **Simultaneous Mode (`submit`)**: Submits requests in parallel batches (controlled by `--concurrency`).
   - **Linear Mode (`linear`)**: Submits cards one-by-one with configurable pacing (`--delay`) and **automatic rate limit backoff (`--cooldown-429`)** if HTTP 429 Too Many Requests is returned.
@@ -24,9 +25,16 @@ Bulk card reviewer & portfolio booster for [Parroto](https://parroto.app).
    *(or run directly with `.\venv\Scripts\python.exe`)*
 
 2. **Configure `.env`**:
-   Copy `.env.example` to `.env` (if not done already) and insert your Parroto token:
+   Add your Firebase credentials to `.env` (refer to `.env.example`):
    ```env
-   BEARER_TOKEN="your_jwt_bearer_token"
+   # Recommended: Refresh Token & API Key (Never expires!)
+   REFRESH_TOKEN="your_refresh_token_here"
+   API_KEY="your_api_key_here"
+
+   # Optional (no longer needed if REFRESH_TOKEN is set):
+   BEARER_TOKEN=""
+
+   # General options
    BUILD_ID="bWYuKDgCvminqE7L8hyo1"
    CONCURRENCY=10
    RATING="again"
@@ -60,7 +68,7 @@ python main.py fetch
 ```
 Scrapes all accessible decks and saves card IDs to `data/cards.json`.
 
-### 4. Continuous Loop Mode
+### 4. Continuous Loop Mode (Runs for hours/days without expiring)
 - **Loop with simultaneous submits**:
   ```bash
   python main.py loop --interval 10
@@ -69,6 +77,11 @@ Scrapes all accessible decks and saves card IDs to `data/cards.json`.
   ```bash
   python main.py loop --linear --interval 10
   ```
+- **Loop with no interval between rounds (back-to-back)**:
+  ```bash
+  python main.py loop --linear --interval 0
+  ```
+  *(Note: See Cooldown considerations below when running without intervals)*
 
 ---
 
@@ -77,11 +90,13 @@ Scrapes all accessible decks and saves card IDs to `data/cards.json`.
 | Flag | Description | Default |
 |---|---|---|
 | `action` | `run`, `fetch`, `submit`, `linear`, `loop` | `run` |
+| `--refresh-token` | Override Firebase refresh token | Read from `.env` |
+| `--api-key` | Override Firebase API key | Read from `.env` |
+| `--token` | Override static Bearer token | Read from `.env` |
 | `--linear` | Run submissions sequentially with 429 backoff | `False` |
 | `--delay` | Delay in seconds between requests in linear mode | `0.5` |
 | `--cooldown-429` | Seconds to pause when hitting HTTP 429 | `10.0` |
 | `--concurrency` | Number of simultaneous requests (simultaneous mode) | `10` |
-| `--token` | Override Parroto Bearer/Access token | Read from `.env` |
 | `--build-id` | Override Next.js build ID | Read from `.env` or auto |
 | `--rating` | Rating level (`again`, `hard`, `good`, `easy`) | `again` |
 | `--cards-file` | Target JSON file path | `data/cards.json` |
