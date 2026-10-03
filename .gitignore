@@ -1,4 +1,6 @@
 
 venv
+data/cards.json
+data/cards_backup.json
 .env
 GEMINI.md
