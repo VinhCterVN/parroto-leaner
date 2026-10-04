@@ -11,8 +11,9 @@ Bulk card reviewer & portfolio booster for [Parroto](https://parroto.app).
   - **Simultaneous Mode (`submit`)**: Submits requests in parallel batches (controlled by `--concurrency`).
   - **Linear Mode (`linear`)**: Submits cards one-by-one with configurable pacing (`--delay`) and **automatic rate limit backoff (`--cooldown-429`)** if HTTP 429 Too Many Requests is returned.
 - **Smart Cooldown Handling**: If a card is still on cooldown within the 10-minute AGAIN window, it logs the remaining time and continues other cards.
+- **💓 Background Online Heartbeat**: Automatically tracks online learning time and status by sending periodic heartbeat requests (`POST /api/learning-time/heartbeat`) every 5 minutes (configurable) with `--heartbeat`. Handles session lifecycle (`/start` -> `/heartbeat` -> `/end`) and auto token renewal.
 - **Loop Mode**: Run continuously every 10 minutes (or custom interval) to automatically farm diamonds and review stats.
-- **Clean CLI**: Easy-to-use commands (`fetch`, `submit`, `linear`, `run`, `loop`).
+- **Clean CLI**: Easy-to-use commands (`fetch`, `submit`, `linear`, `run`, `loop`, `heartbeat`).
 
 ---
 
@@ -83,13 +84,34 @@ Scrapes all accessible decks and saves card IDs to `data/cards.json`.
   ```
   *(Note: See Cooldown considerations below when running without intervals)*
 
+### 5. Running with Online Heartbeat
+To keep your account online and accumulate learning time while running any command, add `--heartbeat`:
+```bash
+# Run with heartbeat (every 5 minutes in background)
+python main.py run --heartbeat
+
+# Continuous loop with linear submit + background heartbeat
+python main.py loop --linear --heartbeat
+
+# Custom heartbeat interval (e.g. ping every 3 minutes)
+python main.py loop --linear --heartbeat --heartbeat-interval 3
+```
+
+### 6. Standalone Heartbeat (Maintain Online Status Only)
+If you just want to keep your account online and accumulate learning time without reviewing cards:
+```bash
+python main.py heartbeat
+```
+
 ---
 
 ## ⚙️ Options & Arguments
 
 | Flag | Description | Default |
 |---|---|---|
-| `action` | `run`, `fetch`, `submit`, `linear`, `loop` | `run` |
+| `action` | `run`, `fetch`, `submit`, `linear`, `loop`, `heartbeat` | `run` |
+| `--heartbeat` | Send online heartbeat ping every 5 minutes in background | `False` |
+| `--heartbeat-interval` | Interval in minutes between heartbeat pings | `5` (or `HEARTBEAT_INTERVAL_MINUTES`) |
 | `--refresh-token` | Override Firebase refresh token | Read from `.env` |
 | `--api-key` | Override Firebase API key | Read from `.env` |
 | `--token` | Override static Bearer token | Read from `.env` |

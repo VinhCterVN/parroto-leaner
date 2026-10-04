@@ -9,6 +9,7 @@ from .auth import TokenManager
 from .models.card import Card
 from .scraper import CardScraper
 from .submitter import CardSubmitter
+from .heartbeat import HeartbeatService
 
 # Ensure UTF-8 output for Vietnamese characters on Windows console
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -27,8 +28,8 @@ def parse_args():
         "action",
         nargs="?",
         default="run",
-        choices=["fetch", "submit", "linear", "submit-linear", "run", "loop"],
-        help="Action to perform: 'fetch' (scrape cards), 'submit' (simultaneous submit), 'linear' (one-by-one with 429 backoff), 'run' (fetch + submit), 'loop' (continuous). Default: 'run'",
+        choices=["fetch", "submit", "linear", "submit-linear", "run", "loop", "heartbeat"],
+        help="Action to perform: 'fetch' (scrape cards), 'submit' (simultaneous submit), 'linear' (one-by-one with 429 backoff), 'run' (fetch + submit), 'loop' (continuous), 'heartbeat' (standalone heartbeat pings). Default: 'run'",
     )
     parser.add_argument(
         "--linear",
@@ -106,6 +107,17 @@ def parse_args():
         action="store_true",
         help="Attempt to scrape cards from pro decks as well (useful if your account is Pro)",
     )
+    parser.add_argument(
+        "--heartbeat",
+        action="store_true",
+        help="Send online heartbeat to Parroto every 5 minutes in background (for updating user online status)",
+    )
+    parser.add_argument(
+        "--heartbeat-interval",
+        type=float,
+        default=None,
+        help="Interval in minutes between heartbeat pings (default: 5 or HEARTBEAT_INTERVAL_MINUTES in .env)",
+    )
     return parser.parse_args()
 
 
@@ -177,73 +189,105 @@ async def async_main():
     action = args.action
     is_linear = args.linear or action in ("linear", "submit-linear")
 
-    if action == "fetch":
-        do_fetch(scraper, cards_path, check_pro=args.check_pro)
+    # Heartbeat configuration
+    is_heartbeat = (
+        args.heartbeat
+        or (args.heartbeat_interval is not None)
+        or config.heartbeat_enabled
+        or action == "heartbeat"
+    )
+    heartbeat_interval = (
+        args.heartbeat_interval
+        if args.heartbeat_interval is not None
+        else config.heartbeat_interval_minutes
+    )
 
-    elif action in ("submit", "linear", "submit-linear"):
-        if args.refresh or not cards_path.exists():
-            cards = do_fetch(scraper, cards_path, check_pro=args.check_pro)
-        else:
-            cards = scraper.load_from_file(cards_path)
+    heartbeat_service = None
+    if is_heartbeat:
+        print(f"[*] Heartbeat enabled: pinging Parroto every {heartbeat_interval:.1f} minute(s) in background.")
+        heartbeat_service = HeartbeatService(
+            token_manager=token_manager,
+            interval_minutes=heartbeat_interval,
+        )
+        await heartbeat_service.start()
 
-        if not cards:
-            print("[!] No cards available to submit.")
-            sys.exit(1)
-        await do_submit(submitter, cards, linear=is_linear, delay=linear_delay, cooldown_429=cooldown_429)
+    try:
+        if action == "heartbeat":
+            print(f"\n[*] Standalone Heartbeat Mode: keeping user online every {heartbeat_interval:.1f} minute(s).")
+            print("[*] Press Ctrl+C at any time to exit.")
+            while True:
+                await asyncio.sleep(3600)
 
-    elif action == "run":
-        if args.refresh or not cards_path.exists():
-            cards = do_fetch(scraper, cards_path, check_pro=args.check_pro)
-        else:
-            print(f"[*] Found existing card database at {cards_path}.")
-            cards = scraper.load_from_file(cards_path)
-            print(f"[*] Loaded {len(cards)} cards from disk. (Use --refresh to re-scrape from web).")
+        elif action == "fetch":
+            await asyncio.to_thread(do_fetch, scraper, cards_path, args.check_pro)
 
-        if not cards:
-            print("[!] No cards available to submit.")
-            sys.exit(1)
+        elif action in ("submit", "linear", "submit-linear"):
+            if args.refresh or not cards_path.exists():
+                cards = await asyncio.to_thread(do_fetch, scraper, cards_path, args.check_pro)
+            else:
+                cards = scraper.load_from_file(cards_path)
 
-        await do_submit(submitter, cards, linear=is_linear, delay=linear_delay, cooldown_429=cooldown_429)
+            if not cards:
+                print("[!] No cards available to submit.")
+                sys.exit(1)
+            await do_submit(submitter, cards, linear=is_linear, delay=linear_delay, cooldown_429=cooldown_429)
 
-    elif action == "loop":
-        if args.refresh or not cards_path.exists():
-            cards = do_fetch(scraper, cards_path, check_pro=args.check_pro)
-        else:
-            cards = scraper.load_from_file(cards_path)
+        elif action == "run":
+            if args.refresh or not cards_path.exists():
+                cards = await asyncio.to_thread(do_fetch, scraper, cards_path, args.check_pro)
+            else:
+                print(f"[*] Found existing card database at {cards_path}.")
+                cards = scraper.load_from_file(cards_path)
+                print(f"[*] Loaded {len(cards)} cards from disk. (Use --refresh to re-scrape from web).")
 
-        if not cards:
-            print("[!] No cards available for loop mode.")
-            sys.exit(1)
-
-        mode_str = "LINEAR" if is_linear else f"SIMULTANEOUS (concurrency={concurrency})"
-        print(f"\n[*] Starting Loop Mode ({mode_str}): will run every {interval} minute(s).")
-        if token_manager.can_refresh:
-            print("[*] Auto-refresh is ACTIVE: tokens will renew automatically in the background.")
-        print("[*] Press Ctrl+C at any time to exit.")
-
-        round_num = 1
-        while True:
-            print(f"\n{'#'*60}")
-            print(f"### LOOP ROUND {round_num} - {time.strftime('%Y-%m-%d %H:%M:%S')}")
-            print(f"{'#'*60}")
-
-            # Ensure valid token before each loop iteration
-            await token_manager.get_token()
+            if not cards:
+                print("[!] No cards available to submit.")
+                sys.exit(1)
 
             await do_submit(submitter, cards, linear=is_linear, delay=linear_delay, cooldown_429=cooldown_429)
 
-            wait_secs = interval * 60
-            if wait_secs > 0:
-                print(f"[*] Round {round_num} completed. Sleeping for {interval} minute(s) ({wait_secs:.1f}s)...")
-                try:
-                    await asyncio.sleep(wait_secs)
-                except asyncio.CancelledError:
-                    break
+        elif action == "loop":
+            if args.refresh or not cards_path.exists():
+                cards = await asyncio.to_thread(do_fetch, scraper, cards_path, args.check_pro)
             else:
-                print(f"[*] Round {round_num} completed. Starting next round immediately without interval...")
-                # Small yield to let any background tasks / cancellation be handled
-                await asyncio.sleep(0)
-            round_num += 1
+                cards = scraper.load_from_file(cards_path)
+
+            if not cards:
+                print("[!] No cards available for loop mode.")
+                sys.exit(1)
+
+            mode_str = "LINEAR" if is_linear else f"SIMULTANEOUS (concurrency={concurrency})"
+            print(f"\n[*] Starting Loop Mode ({mode_str}): will run every {interval} minute(s).")
+            if token_manager.can_refresh:
+                print("[*] Auto-refresh is ACTIVE: tokens will renew automatically in the background.")
+            print("[*] Press Ctrl+C at any time to exit.")
+
+            round_num = 1
+            while True:
+                print(f"\n{'#'*60}")
+                print(f"### LOOP ROUND {round_num} - {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"{'#'*60}")
+
+                # Ensure valid token before each loop iteration
+                await token_manager.get_token()
+
+                await do_submit(submitter, cards, linear=is_linear, delay=linear_delay, cooldown_429=cooldown_429)
+
+                wait_secs = interval * 60
+                if wait_secs > 0:
+                    print(f"[*] Round {round_num} completed. Sleeping for {interval} minute(s) ({wait_secs:.1f}s)...")
+                    try:
+                        await asyncio.sleep(wait_secs)
+                    except asyncio.CancelledError:
+                        break
+                else:
+                    print(f"[*] Round {round_num} completed. Starting next round immediately without interval...")
+                    # Small yield to let any background tasks / cancellation be handled
+                    await asyncio.sleep(0)
+                round_num += 1
+    finally:
+        if heartbeat_service:
+            await heartbeat_service.stop()
 
 
 def main():

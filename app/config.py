@@ -32,6 +32,8 @@ class Config:
         self.loop_interval_minutes: float = float(os.getenv("LOOP_INTERVAL_MINUTES", "10"))
         self.linear_delay: float = float(os.getenv("LINEAR_DELAY", "0.5"))
         self.cooldown_429: float = float(os.getenv("COOLDOWN_429", "10.0"))
+        self.heartbeat_interval_minutes: float = float(os.getenv("HEARTBEAT_INTERVAL_MINUTES", "5"))
+        self.heartbeat_enabled: bool = os.getenv("ENABLE_HEARTBEAT", "false").lower() in ("true", "1", "yes")
 
     def has_auth(self) -> bool:
         has_bearer = bool(self.bearer_token and self.bearer_token not in ("abc_zyz", "your_bearer_token_here"))
