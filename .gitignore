@@ -1,7 +1,6 @@
 
 venv
-data/cards.json
-data/cards_backup.json
-data/advanced_cards.json
+data/*
+!data/cards.example.json
 .env
 GEMINI.md

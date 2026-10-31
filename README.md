@@ -103,6 +103,13 @@ If you just want to keep your account online and accumulate learning time withou
 python main.py heartbeat
 ```
 
+### 7. Keep Windows Awake
+Add `--keep-awake` to any command to prevent automatic Windows sleep for the entire run, including waits between loop rounds:
+```bash
+python main.py loop --linear --heartbeat --keep-awake
+```
+The display can still turn off. The previous sleep state is restored when the command completes, fails, or exits with Ctrl+C. This does not override manual Sleep or laptop lid-close behavior. On other platforms, the flag prints a notice and the command continues normally.
+
 ---
 
 ## ⚙️ Options & Arguments
@@ -110,6 +117,7 @@ python main.py heartbeat
 | Flag | Description | Default |
 |---|---|---|
 | `action` | `run`, `fetch`, `submit`, `linear`, `loop`, `heartbeat` | `run` |
+| `--keep-awake` | Prevent automatic Windows sleep until the command exits | `False` |
 | `--heartbeat` | Send online heartbeat ping every 5 minutes in background | `False` |
 | `--heartbeat-interval` | Interval in minutes between heartbeat pings | `5` (or `HEARTBEAT_INTERVAL_MINUTES`) |
 | `--refresh-token` | Override Firebase refresh token | Read from `.env` |

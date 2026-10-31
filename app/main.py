@@ -10,6 +10,7 @@ from .models.card import Card
 from .scraper import CardScraper
 from .submitter import CardSubmitter
 from .heartbeat import HeartbeatService
+from .power import keep_awake
 
 # Ensure UTF-8 output for Vietnamese characters on Windows console
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -113,6 +114,11 @@ def parse_args():
         help="Send online heartbeat to Parroto every 5 minutes in background (for updating user online status)",
     )
     parser.add_argument(
+        "--keep-awake",
+        action="store_true",
+        help="Prevent automatic Windows sleep while this command runs (display may still turn off)",
+    )
+    parser.add_argument(
         "--heartbeat-interval",
         type=float,
         default=None,
@@ -145,8 +151,9 @@ async def do_submit(
         return await submitter.submit_all(cards)
 
 
-async def async_main():
-    args = parse_args()
+async def async_main(args=None):
+    if args is None:
+        args = parse_args()
 
     # Initialize TokenManager
     token_manager = TokenManager(
@@ -292,7 +299,9 @@ async def async_main():
 
 def main():
     try:
-        asyncio.run(async_main())
+        args = parse_args()
+        with keep_awake(args.keep_awake):
+            asyncio.run(async_main(args))
     except KeyboardInterrupt:
         print("\n[!] Operation cancelled by user. Exiting cleanly.")
 
