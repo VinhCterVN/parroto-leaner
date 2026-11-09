@@ -4,13 +4,14 @@ import sys
 import time
 from pathlib import Path
 
-from .config import config, clean_token
+from .config import ROOT_DIR, config, clean_token
 from .auth import TokenManager
 from .models.card import Card
 from .scraper import CardScraper
 from .submitter import CardSubmitter
 from .heartbeat import HeartbeatService
 from .power import keep_awake
+from .groups import GroupLoopError, load_group_decks, run_group_loop, validate_group_options
 
 # Ensure UTF-8 output for Vietnamese characters on Windows console
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -29,8 +30,8 @@ def parse_args():
         "action",
         nargs="?",
         default="run",
-        choices=["fetch", "submit", "linear", "submit-linear", "run", "loop", "heartbeat"],
-        help="Action to perform: 'fetch' (scrape cards), 'submit' (simultaneous submit), 'linear' (one-by-one with 429 backoff), 'run' (fetch + submit), 'loop' (continuous), 'heartbeat' (standalone heartbeat pings). Default: 'run'",
+        choices=["fetch", "submit", "linear", "submit-linear", "run", "loop", "group-loop", "heartbeat"],
+        help="Action to perform: 'fetch' (scrape cards), 'submit' (simultaneous submit), 'linear' (one-by-one with 429 backoff), 'run' (fetch + submit), 'loop' (continuous), 'group-loop' (reset groups before every review round), 'heartbeat' (standalone heartbeat pings). Default: 'run'",
     )
     parser.add_argument(
         "--linear",
@@ -93,10 +94,27 @@ def parse_args():
         help="Path to JSON file for storing/loading cards (default: data/cards.json)",
     )
     parser.add_argument(
+        "--deckId", "--deck-id",
+        dest="deck_id",
+        default=None,
+        help="Deck for group-loop (default: DECK_ID/deckId in .env, otherwise all decks in group data)",
+    )
+    parser.add_argument(
+        "--groups-file",
+        default=None,
+        help="Group-loop JSON file or directory (default: data/group/*.json, excluding *.example.json)",
+    )
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=None,
+        help="Stop group-loop after this many completed rounds (default: repeat until Ctrl+C)",
+    )
+    parser.add_argument(
         "--interval",
         type=float,
         default=None,
-        help="Interval in minutes between submit rounds in 'loop' mode (default: 10, set to 0 for no interval)",
+        help="Minutes between rounds (default: LOOP_INTERVAL_MINUTES for loop, 0 for group-loop)",
     )
     parser.add_argument(
         "--refresh",
@@ -155,6 +173,25 @@ async def async_main(args=None):
     if args is None:
         args = parse_args()
 
+    group_decks = None
+    if args.action == "group-loop":
+        # Invalid or missing local data must halt before authentication or API calls.
+        try:
+            source = Path(args.groups_file) if args.groups_file else ROOT_DIR / "data" / "group"
+            deck_id = args.deck_id if args.deck_id is not None else (config.deck_id or None)
+            group_decks = load_group_decks(source, deck_id)
+            validate_group_options(
+                rating=args.rating or config.rating,
+                concurrency=args.concurrency if args.concurrency is not None else config.concurrency,
+                delay=args.delay if args.delay is not None else config.linear_delay,
+                cooldown_429=args.cooldown_429 if args.cooldown_429 is not None else config.cooldown_429,
+                interval_minutes=args.interval if args.interval is not None else 0.0,
+                rounds=args.rounds,
+            )
+        except ValueError as exc:
+            print(f"[ERROR] {exc}")
+            sys.exit(1)
+
     # Initialize TokenManager
     token_manager = TokenManager(
         access_token=clean_token(args.token) if args.token else None,
@@ -186,7 +223,9 @@ async def async_main(args=None):
     linear_delay = args.delay if args.delay is not None else config.linear_delay
     cooldown_429 = args.cooldown_429 if args.cooldown_429 is not None else config.cooldown_429
 
-    scraper = CardScraper(token_manager=token_manager, build_id=build_id)
+    # Group data is local; constructing the scraper would synchronously refresh
+    # its token even though this action never scrapes cards.
+    scraper = None if args.action == "group-loop" else CardScraper(token_manager=token_manager, build_id=build_id)
     submitter = CardSubmitter(
         token_manager=token_manager,
         rating=rating,
@@ -224,6 +263,20 @@ async def async_main(args=None):
             print("[*] Press Ctrl+C at any time to exit.")
             while True:
                 await asyncio.sleep(3600)
+
+        elif action == "group-loop":
+            try:
+                await run_group_loop(
+                    group_decks, token_manager, submitter,
+                    linear=is_linear,
+                    delay=linear_delay,
+                    cooldown_429=cooldown_429,
+                    interval_minutes=args.interval if args.interval is not None else 0.0,
+                    rounds=args.rounds,
+                )
+            except (GroupLoopError, ValueError) as exc:
+                print(f"[ERROR] {exc}")
+                sys.exit(1)
 
         elif action == "fetch":
             await asyncio.to_thread(do_fetch, scraper, cards_path, args.check_pro)

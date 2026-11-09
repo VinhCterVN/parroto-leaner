@@ -1,6 +1,17 @@
 
 venv
+__pycache__/
+*.py[cod]
 data/*
 !data/cards.example.json
+!data/group/
+data/group/*
+!data/group/*.example.json
 .env
+
+graphify-out/
+
+*.rest
+
+AGENTS.md
 GEMINI.md

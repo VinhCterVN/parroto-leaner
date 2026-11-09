@@ -29,6 +29,7 @@ class Config:
         self.concurrency: int = int(os.getenv("CONCURRENCY", "10"))
         self.rating: str = os.getenv("RATING", "again").strip().strip('"').strip("'")
         self.cards_file: Path = ROOT_DIR / os.getenv("CARDS_FILE", "data/cards.json")
+        self.deck_id: str = (os.getenv("DECK_ID") or os.getenv("deckId") or "").strip().strip('"').strip("'")
         self.loop_interval_minutes: float = float(os.getenv("LOOP_INTERVAL_MINUTES", "10"))
         self.linear_delay: float = float(os.getenv("LINEAR_DELAY", "0.5"))
         self.cooldown_429: float = float(os.getenv("COOLDOWN_429", "10.0"))
