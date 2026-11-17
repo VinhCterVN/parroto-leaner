@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, patch
 # Keep local credentials out of tests.
 with patch("dotenv.load_dotenv"):
     from app.main import async_main, config, main, parse_args
-    from app.config import Config
+    from app.config import Config, parse_delay, sample_delay
+    from app.models.card import Card, SubmitResult
+    from app.submitter import CardSubmitter
 
 
 class KeepAwakeCliTests(unittest.TestCase):
@@ -128,6 +130,76 @@ class DeckEnvironmentTests(unittest.TestCase):
         for env, expected in (({}, ""), ({"deckId": "camel"}, "camel"), ({"DECK_ID": "canonical", "deckId": "camel"}, "canonical")):
             with self.subTest(env=env), patch.dict(os.environ, env, clear=True):
                 self.assertEqual(Config().deck_id, expected)
+
+
+class DelayOptionTests(unittest.IsolatedAsyncioTestCase):
+    def test_parse_delay_accepts_decimal_and_range(self):
+        self.assertEqual(parse_delay("0.5"), 0.5)
+        self.assertEqual(parse_delay(0), 0.0)
+        self.assertEqual(parse_delay("[0.45, 4]"), (0.45, 4.0))
+        self.assertEqual(parse_delay("[0.45,4]"), (0.45, 4.0))
+        self.assertEqual(parse_delay((0.45, 4)), (0.45, 4.0))
+
+    def test_parse_delay_rejects_invalid_values(self):
+        for raw in ("nan", "-0.1", "[4, 0.45]", "[-1, 2]", "[0.45]", "[0.45, 1, 2]", "[a, b]", "[0.45,"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                parse_delay(raw)
+
+    def test_sample_delay_rounds_range_to_two_decimals(self):
+        with patch("app.config.random.uniform", return_value=1.23456) as uniform:
+            self.assertEqual(sample_delay((0.45, 4.0)), 1.23)
+        uniform.assert_called_once_with(0.45, 4.0)
+        self.assertEqual(sample_delay(0.5), 0.5)
+
+    def test_parse_args_merges_unquoted_and_quoted_delay_range(self):
+        for argv in (
+            ["main.py", "run", "--linear", "--delay", "[0.45, 4]"],
+            ["main.py", "run", "--linear", "--delay", "[0.45,", "4]"],
+        ):
+            with self.subTest(argv=argv), patch("sys.argv", argv):
+                args = parse_args()
+            self.assertEqual(parse_delay(args.delay), (0.45, 4.0))
+
+    async def test_run_linear_passes_delay_range_and_rejects_bad_range(self):
+        manager = AsyncMock()
+        manager.access_token = "test-token"
+        manager.can_refresh = False
+        scraper = AsyncMock()
+        scraper.load_from_file = lambda _p: [Card(card_id="c1", word="w1")]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cards_file = Path(temp_dir) / "cards.json"
+            cards_file.write_text("[]", encoding="utf-8")
+            with patch("sys.argv", ["main.py", "run", "--linear", "--delay", "[0.45,", "4]", "--cards-file", str(cards_file)]):
+                args = parse_args()
+            with patch("app.main.TokenManager", return_value=manager), \
+                 patch("app.main.CardScraper", return_value=scraper), \
+                 patch("app.main.do_submit", new_callable=AsyncMock) as submit, \
+                 patch("builtins.print"):
+                await async_main(args)
+            self.assertEqual(submit.call_args.kwargs["delay"], (0.45, 4.0))
+
+        with patch("sys.argv", ["main.py", "run", "--linear", "--delay", "[4, 0.45]"]):
+            bad_args = parse_args()
+        with patch("app.main.TokenManager") as token_cls, patch("builtins.print"):
+            with self.assertRaises(SystemExit) as error:
+                await async_main(bad_args)
+        self.assertEqual(error.exception.code, 1)
+        token_cls.assert_not_called()
+
+    async def test_submit_linear_sleeps_random_two_decimal_delays_between_cards(self):
+        submitter = CardSubmitter(bearer_token="tok", rating="good", concurrency=1)
+        cards = [Card(card_id="c1", word="w1"), Card(card_id="c2", word="w2"), Card(card_id="c3", word="w3")]
+        ok_res = SubmitResult(card_id="c1", word="w1", status="success", status_code=200, message="ok", diamonds_earned=1)
+
+        with patch.object(submitter, "_send_request", new_callable=AsyncMock, return_value=ok_res), \
+             patch("app.config.random.uniform", side_effect=[0.456, 3.999]), \
+             patch("app.submitter.asyncio.sleep", new_callable=AsyncMock) as sleep_mock, \
+             patch("builtins.print"):
+            results = await submitter.submit_linear(cards, delay=(0.45, 4.0))
+
+        self.assertEqual(len(results), 3)
+        self.assertEqual([call.args[0] for call in sleep_mock.await_args_list], [0.46, 4.0])
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import sys
 import time
 from pathlib import Path
 
-from .config import ROOT_DIR, config, clean_token
+from .config import ROOT_DIR, DelaySpec, clean_token, config, parse_delay
 from .auth import TokenManager
 from .models.card import Card
 from .scraper import CardScraper
@@ -22,7 +22,30 @@ if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         pass
 
 
-def parse_args():
+def _normalize_delay_argv(argv: list[str]) -> list[str]:
+    """Merge unquoted `--delay [min, max]` tokens into a single `--delay` value."""
+    normalized: list[str] = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--delay" and i + 1 < len(argv) and argv[i + 1].startswith("[") and not argv[i + 1].endswith("]"):
+            merged = [argv[i + 1]]
+            j = i + 2
+            while j < len(argv):
+                merged.append(argv[j])
+                if argv[j].endswith("]"):
+                    j += 1
+                    break
+                j += 1
+            normalized.extend([token, " ".join(merged)])
+            i = j
+            continue
+        normalized.append(token)
+        i += 1
+    return normalized
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Parroto Bulk Cards Learner - Automatically scrape preview cards and submit bulk reviews."
     )
@@ -40,9 +63,9 @@ def parse_args():
     )
     parser.add_argument(
         "--delay",
-        type=float,
+        type=str,
         default=None,
-        help="Delay in seconds between linear requests (default: 0.5s)",
+        help="Delay in seconds between linear requests, as a number (e.g. 0.5) or random range [min, max] (e.g. [0.45, 4]) (default: 0.5s)",
     )
     parser.add_argument(
         "--cooldown-429",
@@ -142,7 +165,8 @@ def parse_args():
         default=None,
         help="Interval in minutes between heartbeat pings (default: 5 or HEARTBEAT_INTERVAL_MINUTES in .env)",
     )
-    return parser.parse_args()
+    raw_argv = sys.argv[1:] if argv is None else list(argv)
+    return parser.parse_args(_normalize_delay_argv(raw_argv))
 
 
 def do_fetch(scraper: CardScraper, cards_path: Path, check_pro: bool = False):
@@ -159,7 +183,7 @@ async def do_submit(
     submitter: CardSubmitter,
     cards,
     linear: bool = False,
-    delay: float = 0.5,
+    delay: DelaySpec = 0.5,
     cooldown_429: float = 10.0,
 ):
     print("\n--- [STEP 2] SUBMITTING REVIEWS ---")
@@ -172,6 +196,12 @@ async def do_submit(
 async def async_main(args=None):
     if args is None:
         args = parse_args()
+
+    try:
+        linear_delay = parse_delay(args.delay) if args.delay is not None else config.linear_delay
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        sys.exit(1)
 
     group_decks = None
     if args.action == "group-loop":
@@ -220,7 +250,6 @@ async def async_main(args=None):
     rating = args.rating or config.rating
     cards_path = Path(args.cards_file) if args.cards_file else config.cards_file
     interval = args.interval if args.interval is not None else config.loop_interval_minutes
-    linear_delay = args.delay if args.delay is not None else config.linear_delay
     cooldown_429 = args.cooldown_429 if args.cooldown_429 is not None else config.cooldown_429
 
     # Group data is local; constructing the scraper would synchronously refresh

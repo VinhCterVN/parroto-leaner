@@ -10,6 +10,7 @@ from urllib.parse import quote
 import httpx
 
 from .auth import TokenManager
+from .config import DelaySpec, parse_delay
 from .models.card import Card
 from .submitter import CardSubmitter
 
@@ -180,7 +181,7 @@ def validate_group_options(
     *,
     rating: str,
     concurrency: int,
-    delay: float,
+    delay: DelaySpec | str,
     cooldown_429: float,
     interval_minutes: float,
     rounds: int | None,
@@ -192,7 +193,8 @@ def validate_group_options(
         raise ValueError("RATING must be again, hard, good, or easy")
     if concurrency < 1:
         raise ValueError("--concurrency must be positive")
-    for name, value in (("--delay", delay), ("--cooldown-429", cooldown_429), ("--interval", interval_minutes)):
+    parse_delay(delay)
+    for name, value in (("--cooldown-429", cooldown_429), ("--interval", interval_minutes)):
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"{name} must be a finite, non-negative number")
 
@@ -203,7 +205,7 @@ async def run_group_loop(
     submitter: CardSubmitter,
     *,
     linear: bool = False,
-    delay: float = 0.5,
+    delay: DelaySpec | str = 0.5,
     cooldown_429: float = 10.0,
     interval_minutes: float = 0.0,
     rounds: int | None = None,

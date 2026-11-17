@@ -4,7 +4,7 @@ from typing import List, Optional, Any
 import httpx
 
 from .models.card import Card, SubmitResult
-from .config import config
+from .config import DelaySpec, config, format_delay, parse_delay, sample_delay
 
 SUBMIT_URL = "https://api.parroto.app/api/learning-vocabulary/submit"
 
@@ -187,7 +187,7 @@ class CardSubmitter:
     async def submit_linear(
         self,
         cards: List[Card],
-        delay: float = 0.5,
+        delay: DelaySpec | str = 0.5,
         rate_limit_delay: float = 10.0,
         max_429_retries: int = 3,
     ) -> List[SubmitResult]:
@@ -199,8 +199,12 @@ class CardSubmitter:
             print("[-] No cards provided to submit.")
             return []
 
+        parsed_delay = parse_delay(delay)
         total = len(cards)
-        print(f"[*] Submitting {total} cards LINEARLY (delay: {delay}s, 429 cooldown: {rate_limit_delay}s, rating: '{self.rating}')...\n")
+        print(
+            f"[*] Submitting {total} cards LINEARLY "
+            f"(delay: {format_delay(parsed_delay)}, 429 cooldown: {rate_limit_delay}s, rating: '{self.rating}')...\n"
+        )
 
         results: List[SubmitResult] = []
         async with httpx.AsyncClient(timeout=25.0) as client:
@@ -226,9 +230,11 @@ class CardSubmitter:
                         results.append(res)
                         break
 
-                # Sleep standard delay between cards
-                if delay > 0 and i < total:
-                    await asyncio.sleep(delay)
+                # Sleep standard or random-range delay between cards
+                if i < total:
+                    sleep_seconds = sample_delay(parsed_delay)
+                    if sleep_seconds > 0:
+                        await asyncio.sleep(sleep_seconds)
 
         self._print_summary(results, total, mode_name="LINEAR BATCH")
         return results
